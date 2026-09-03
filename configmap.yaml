@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-config
+data:
+  TZ: "America/Sao_Paulo"
+
+  # --- Banco de dados (MariaDB no namespace `mariadb`) ---
+  MYSQL_DATABASE: "nextcloud"
+  MYSQL_USER: "nextcloud"
+  MYSQL_HOST: "mariadb.mariadb.svc.cluster.local"
+
+  # --- Cache ---
+  REDIS_HOST: "redis.redis.svc.cluster.local"
+
+  # --- Admin bootstrap (só usado na instalação inicial) ---
+  # A senha ficava aqui como "admin"; movida para o Secret (`nextcloud-secret`)
+  # e trocada via `occ` em 2026-09-03. Aqui fica só o nome do usuário.
+  NEXTCLOUD_ADMIN_USER: "admin"
+
+  # --- Rede / URLs (TLS termina na borda: Cloudflare Tunnel) ---
+  NEXTCLOUD_TRUSTED_DOMAINS: "lynkado.com.br"
+  OVERWRITEHOST: "lynkado.com.br"
+  OVERWRITEPROTOCOL: "https"
+  TRUSTED_PROXIES: "192.168.2.0/24 10.244.0.0/24"
+
+  SERVER_ID: "1"

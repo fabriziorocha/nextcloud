@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nextcloud-cron
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Allow
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            # Usado só pela NetworkPolicy `nextcloud-cron-egress`. Não bate no
+            # selector do Service (`app: nextcloud`), então o pod de cron não
+            # recebe tráfego HTTP. (No cluster "as-is" o pod não tinha labels.)
+            app: nextcloud-cron
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: nextcloud-cron
+              image: nextcloud
+              command:
+                - sh
+                - -c
+                - "echo 'Iniciando cron do Nextcloud...'; php /var/www/html/cron.php 2>&1; status=$?; echo 'Cron do Nextcloud finalizado.'; exit $status"
+              securityContext:
+                runAsUser: 33          # www-data
+              volumeMounts:
+                - name: nextcloud
+                  mountPath: /var/www/html/
+          volumes:
+            - name: nextcloud
+              persistentVolumeClaim:
+                claimName: nextcloud

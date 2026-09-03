@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nextcloud
+
+# Snapshot fiel ("as-is") do que está publicado no namespace `nextcloud`
+# do cluster Talos em 2026-09-03. NÃO é uma versão endurecida/idealizada —
+# reproduz o estado real, inclusive suas pendências (ver README.md).
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - configmap-remoteip.yaml
+  - sealed-secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - cronjob.yaml
+  - service.yaml
+  - networkpolicy.yaml
+
+# Labels recomendadas do Kubernetes. O Lens agrupa recursos em "Applications"
+# pela label app.kubernetes.io/instance (+ name) presente nos objetos de workload.
+# includeSelectors: false  -> nao altera spec.selector.matchLabels (campo imutavel).
+# includeTemplates: true   -> propaga para o pod template (pods aparecem sob a app).
+labels:
+  - pairs:
+      app.kubernetes.io/name: nextcloud
+      app.kubernetes.io/instance: nextcloud
+      app.kubernetes.io/component: groupware
+      app.kubernetes.io/part-of: nextcloud
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+    includeTemplates: true

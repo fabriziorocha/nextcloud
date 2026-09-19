@@ -30,3 +30,13 @@ labels:
       app.kubernetes.io/managed-by: kustomize
     includeSelectors: false
     includeTemplates: true
+
+# Tag fixada explicitamente (era `nextcloud:latest` direto no deployment/cronjob
+# — pullPolicy Always + sem tag podia saltar major version num restart, e o
+# Nextcloud não suporta pular major no upgrade). 34.0.4-apache é o último patch
+# estável da major 34, que é a rodando hoje no cluster (ver README). Aplica-se
+# a qualquer `image: nextcloud` no kustomization, então cobre deployment.yaml
+# e cronjob.yaml com a mesma versão.
+images:
+  - name: nextcloud
+    newTag: "34.0.4-apache"

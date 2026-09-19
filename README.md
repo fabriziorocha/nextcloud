@@ -18,7 +18,7 @@ Reconstrução **fiel ("as-is")** dos manifestos que compõem a aplicação
 | `secret.local.yaml` | valores em claro para gerar o sealed — **em `.gitignore`** |
 | `sealed-secret.yaml` | `SealedSecret/nextcloud-secret` (único segredo versionado) |
 | `pvc.yaml` | `PersistentVolumeClaim/nextcloud` (256Gi, `local-path`) |
-| `deployment.yaml` | `Deployment/nextcloud` (1 réplica, `nextcloud:latest`) |
+| `deployment.yaml` | `Deployment/nextcloud` (1 réplica, imagem/tag definidas no `kustomization.yaml`) |
 | `cronjob.yaml` | `CronJob/nextcloud-cron` (`*/5 * * * *`, `php cron.php`) |
 | `service.yaml` | `Service/nextcloud` ClusterIP (80) |
 | `networkpolicy.yaml` | default-deny + ingress só do `cloudflared` + egress mínimo |
@@ -34,7 +34,7 @@ no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
 | Versão Nextcloud | 34.0.3 (imagem `docker.io/library/nextcloud:latest`) |
 | Deployment revision | 49 (muitas edições manuais via Lens/kubectl) |
 | Banco | MariaDB — `mariadb.mariadb.svc.cluster.local` |
-| Cache | Redis — `redis.redis.svc.cluster.local` |
+| Cache / lock | Redis — `redis.redis.svc.cluster.local:6379`, **com senha** (ver projeto `redis`) |
 | Domínio público | `https://lynkado.com.br` via **Cloudflare Tunnel** (`cloudflared` no ns `cloudflare`) |
 | Recursos do pod | requests `300m`/`768Mi` · limits `1500m`/`3Gi` |
 
@@ -62,17 +62,50 @@ kubectl -n nextcloud rollout status deploy/nextcloud
 > `occ user:resetpassword admin` dentro do pod; o valor no Secret foi alinhado
 > à nova senha. O usuário `admin` tem **2FA (TOTP) ativo** — login por senha
 > pura (WebDAV/basic-auth) não funciona sem app-password ou o código TOTP.
+>
+> **Senha do Redis (2026-09-03):** o Redis passou a exigir `requirepass`
+> (projeto `redis`). A senha entra pela env **`REDIS_HOST_PASSWORD`** (no
+> `SealedSecret`), porque a imagem oficial roda `config/redis.config.php` a cada
+> request e ele sobrescreve o bloco `redis` do `config.php` — `occ
+> config:system:set redis password` é ignorado. Trocar a senha do Redis exige
+> re-selar este secret + `rollout restart`.
 
 ## Pendências (drift / problemas capturados no snapshot)
 
-1. **Imagem sem tag** (`nextcloud` → `:latest`, `pullPolicy: Always`). Restart
-   pode saltar major version e quebrar o upgrade. Fixar `nextcloud:34-apache`.
+1. ~~Imagem sem tag~~ — **resolvido em 2026-09-19**: tag fixada em
+   `34.0.4-apache` via `images:` no `kustomization.yaml` (aplica-se a
+   `deployment.yaml` e `cronjob.yaml`). `pullPolicy` continua `Always`.
 2. ~~Credenciais de admin em ConfigMap~~ — **resolvido em 2026-09-03**: senha
    trocada via `occ`, movida para o `SealedSecret`, removida do ConfigMap.
 3. **Recursos divergentes** do manifesto original versionado (que pedia
-   2CPU/4Gi–4CPU/8Gi). Aqui já estão os valores reais do cluster.
-4. **Namespace sem Pod Security Admission** (os projetos n8n/minio usam
-   `restricted`). O pod roda como root.
+   2CPU/4Gi–4CPU/8Gi). Aqui já estão os valores reais do cluster —
+   `limits.memory: 3Gi`. O pod foi **OOMKilled em 2026-09-03T22:57** (rodou
+   ~9h e estourou). Avaliar subir para 4Gi ou investigar vazamento.
+   ⚠️ Todo restart do pod re-gera o `config.php` a partir das envs — se faltar
+   `REDIS_HOST_PASSWORD` no Secret, o Redis quebra (NOAUTH) silenciosamente.
+4. ~~Namespace sem Pod Security Admission~~ — **resolvido em 2026-09-19**:
+   `pod-security.kubernetes.io/enforce=restricted` ativo em `namespace.yaml`,
+   alinhado com n8n/minio. Pod web e cron agora rodam 100% non-root
+   (`runAsUser/Group: 33`, `drop: ["ALL"]`, `seccompProfile: RuntimeDefault`;
+   o pod web soma `NET_BIND_SERVICE` para bindar a porta 80). Dois problemas
+   apareceram no meio do caminho e foram corrigidos:
+   - O entrypoint da imagem oficial escreve
+     `/usr/local/etc/php/conf.d/redis-session.ini` (dir `root:root`) sempre
+     que `REDIS_HOST` está definido — é a única escrita fora do
+     `/var/www/html` no fluxo normal de start (auditado no `entrypoint.sh`).
+     Corrigido com o `initContainer redis-session-ini` em `deployment.yaml`,
+     que replica essa lógica escrevendo num `emptyDir` montado via `subPath`
+     só nesse arquivo. **Esse initContainer é permanente** — roda em todo pod
+     novo, não é correção de uma vez só (o diretório é do filesystem da
+     imagem, não do PVC).
+   - `/var/www/html/nextcloud-init-sync.lock` tinha ficado `root:root` no PVC
+     (resíduo de quando o pod sempre rodava como root) e bloqueava o
+     non-root. Corrigido uma única vez via `chown www-data:www-data` — esse,
+     sim, foi definitivo (é dado no PVC, não recriado a cada pod).
+   ⚠️ Não testado: o caminho de **upgrade de major** do entrypoint
+   (`NEXTCLOUD_UPDATE=1`) sob non-root — só será exercitado no próximo bump
+   de major version. Se falhar, o rollout trava com o `enforce: restricted`
+   já ativo; ter esse Pendência em mente antes do próximo upgrade de major.
 5. **`strategy` padrão (RollingUpdate)** com PVC RWO — pode travar rollout.
 6. Sem ServiceAccount dedicada (usa `default`).
 7. **NetworkPolicy não é aplicada pelo Flannel** (CNI atual). `networkpolicy.yaml`

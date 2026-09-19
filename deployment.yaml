@@ -14,13 +14,73 @@ spec:
       labels:
         app: nextcloud
     spec:
+      # Compatível com Pod Security "restricted" (ver namespace.yaml).
+      # O entrypoint da imagem oficial escreve
+      # /usr/local/etc/php/conf.d/redis-session.ini em toda subida de pod
+      # (dir é root:root — auditado em 2026-09-19, é a ÚNICA escrita fora do
+      # /var/www/html no fluxo normal de start). Como non-root não consegue
+      # gravar lá, o initContainer abaixo replica essa mesma lógica e escreve
+      # o .ini num emptyDir, montado por subPath só nesse arquivo (o resto do
+      # conf.d, que vem da imagem, continua intocado). PERMANENTE: precisa
+      # rodar em todo pod novo, não é correção de uma vez só.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 33          # www-data
+        runAsGroup: 33
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: redis-session-ini
+          image: nextcloud
+          envFrom:
+            - configMapRef:
+                name: nextcloud-config
+            - secretRef:
+                name: nextcloud-secret
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if [ -z "${REDIS_HOST:-}" ]; then
+                echo "REDIS_HOST não definido, pulando redis-session.ini"
+                exit 0
+              fi
+              case "$REDIS_HOST" in
+                /*) redis_save_path="unix://${REDIS_HOST}" ;;
+                *) redis_save_path="tcp://${REDIS_HOST}:${REDIS_HOST_PORT:-6379}" ;;
+              esac
+              redis_auth=''
+              if [ -n "${REDIS_HOST_PASSWORD:-}" ] && [ -n "${REDIS_HOST_USER:-}" ]; then
+                redis_auth="?auth[]=${REDIS_HOST_USER}&auth[]=${REDIS_HOST_PASSWORD}"
+              elif [ -n "${REDIS_HOST_PASSWORD:-}" ]; then
+                redis_auth="?auth=${REDIS_HOST_PASSWORD}"
+              fi
+              {
+                echo 'session.save_handler = redis'
+                echo "session.save_path = \"${redis_save_path}${redis_auth}\""
+                echo "redis.session.locking_enabled = 1"
+                echo "redis.session.lock_retries = -1"
+                echo "redis.session.lock_wait_time = 10000"
+              } > /shared/redis-session.ini
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: redis-session-conf
+              mountPath: /shared
       containers:
         - name: nextcloud
-          # as-is: imagem SEM tag => nextcloud:latest, imagePullPolicy: Always.
-          # Cada restart pode puxar um novo major (hoje: 34.0.3). Nextcloud não
-          # suporta pular major version — o certo seria fixar `nextcloud:34-apache`.
+          # Tag fixada via `images:` no kustomization.yaml (mesma versão usada
+          # pelo cronjob.yaml).
           image: nextcloud
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
           ports:
             - containerPort: 80
           envFrom:
@@ -36,6 +96,9 @@ spec:
             - name: remoteip
               mountPath: /etc/apache2/conf-enabled/remoteip.conf
               subPath: remoteip.conf
+            - name: redis-session-conf
+              mountPath: /usr/local/etc/php/conf.d/redis-session.ini
+              subPath: redis-session.ini
           livenessProbe:
             tcpSocket:
               port: 80
@@ -44,12 +107,15 @@ spec:
             tcpSocket:
               port: 80
             initialDelaySeconds: 15
-          # Valores REAIS no cluster (ajustados à mão via Lens). O manifesto
-          # original versionado pedia requests 2CPU/4Gi e limits 4CPU/8Gi.
+          # Uso observado (Prometheus/lens-metrics, 2d): steady ~330Mi / <50m;
+          # pico ~3050Mi / ~1500m por <1h durante `occ upgrade`/repair de major.
+          # -> request enxuto (steady real); limit mantido em 3Gi para o pico.
+          # ATENÇÃO: em upgrade de major do Nextcloud, suba o limit p/ 4Gi antes
+          # do rollout — OOM no meio da migração de schema deixa o banco inconsistente.
           resources:
             requests:
-              cpu: "300m"
-              memory: "768Mi"
+              cpu: "150m"
+              memory: "512Mi"
             limits:
               cpu: "1500m"
               memory: "3Gi"
@@ -62,3 +128,5 @@ spec:
         - name: remoteip
           configMap:
             name: nextcloud-remoteip
+        - name: redis-session-conf
+          emptyDir: {}

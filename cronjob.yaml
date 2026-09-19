@@ -4,11 +4,17 @@ metadata:
   name: nextcloud-cron
 spec:
   schedule: "*/5 * * * *"
-  concurrencyPolicy: Allow
+  # Forbid: se um cron passar dos 5 min, o próximo NÃO sobe em paralelo. Sem isso
+  # um cron.php travado empilha pods (que não têm limite de memória) e derruba o
+  # node por pressão de memória.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
+      # Mata o job se cron.php ficar preso além de 15 min.
+      activeDeadlineSeconds: 900
       template:
         metadata:
           labels:
@@ -18,8 +24,14 @@ spec:
             app: nextcloud-cron
         spec:
           restartPolicy: OnFailure
+          # Compatível com Pod Security "restricted" (ver namespace.yaml).
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: nextcloud-cron
+              # Mesma tag do pod web, fixada via `images:` no kustomization.yaml.
               image: nextcloud
               command:
                 - sh
@@ -27,6 +39,17 @@ spec:
                 - "echo 'Iniciando cron do Nextcloud...'; php /var/www/html/cron.php 2>&1; status=$?; echo 'Cron do Nextcloud finalizado.'; exit $status"
               securityContext:
                 runAsUser: 33          # www-data
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              # Uso observado: ~60Mi / ~2m. Limite dá teto p/ não afetar o node
+              # (o pod web tem prioridade; o cron é best-effort).
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  memory: "512Mi"
               volumeMounts:
                 - name: nextcloud
                   mountPath: /var/www/html/

@@ -2,7 +2,11 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: nextcloud
-  # ATENÇÃO (as-is): ao contrário dos projetos n8n/minio, este namespace NÃO
-  # tem Pod Security Admission em `restricted`. O pod roda como root (imagem
-  # oficial nextcloud:apache) e não seria admitido sob o perfil restricted.
-  # labels no cluster hoje: apenas kubernetes.io/metadata.name=nextcloud
+  # Pod Security Admission em `restricted`, alinhado com n8n/minio (2026-09-19).
+  # Só foi possível depois de tornar deployment.yaml e cronjob.yaml 100%
+  # non-root (ver README, Pendências #4).
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

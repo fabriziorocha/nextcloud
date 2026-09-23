@@ -1,7 +1,7 @@
-# ATENÇÃO: o CNI deste cluster é o Flannel, que NÃO implementa NetworkPolicy.
-# Estas regras ficam como intenção declarativa até instalar um enforcer
-# (kubernetes-sigs/kube-network-policies, Calico policy-only) ou migrar p/ Cilium.
-# Mesma ressalva dos repos n8n / minio / mcp-server / evolution.
+# ATUALIZAÇÃO (20/09/2026): o enforcer kubernetes-sigs/kube-network-policies
+# já está instalado e ATIVO no cluster (DaemonSet kube-network-policies em
+# kube-system) -- estas regras estão em vigor de fato, não são mais apenas
+# intenção declarativa. Revisar antes de assumir "sem efeito".
 ---
 # 1. Nega todo tráfego (entrada e saída) por padrão no namespace.
 apiVersion: networking.k8s.io/v1
@@ -31,6 +31,32 @@ spec:
           podSelector:
             matchLabels:
               app: cloudflared
+      ports:
+        - protocol: TCP
+          port: 80
+---
+# 2b. Ingress: libera a probe de liveness/readiness do kubelet (tcpSocket:80).
+#     Com Flannel, o tráfego do kubelet para um pod no MESMO node sai com IP
+#     de origem 10.244.0.1 (gateway da bridge cni0), não com o IP real do
+#     node -- o kube-network-policies não reconhece isso como "tráfego do
+#     host" e aplicava o default-deny, descartando uma fração das probes
+#     (confirmado em 19-20/09/2026, ~1.1k drops nesse padrão). Sem 3 falhas
+#     consecutivas o pod não é marcado unhealthy, mas o descarte é real.
+#     OBS: 10.244.0.1 é o gateway do único node hoje. Um segundo node teria
+#     seu próprio gateway (ex.: 10.244.1.1) e precisaria de outra entrada.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-allow-kubelet-probes
+spec:
+  podSelector:
+    matchLabels:
+      app: nextcloud
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.244.0.1/32
       ports:
         - protocol: TCP
           port: 80

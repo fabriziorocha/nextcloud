@@ -24,6 +24,7 @@ Reconstrução **fiel ("as-is")** dos manifestos que compõem a aplicação
 | `networkpolicy.yaml` | default-deny + ingress só do `cloudflared` + egress mínimo |
 | `kustomization.yaml` | junta tudo no ns `nextcloud` + labels `app.kubernetes.io/*` (Lens agrupa como "Application") |
 | `backup/` | Backup diário (dump do MariaDB + config + apps + arquivos) com restic → MinIO e Cloudflare R2; aplicado com `kubectl apply -k backup` |
+| `secret.oidc.local.yaml` | secret do client OIDC `nextcloud` no Keycloak — **em `.gitignore`** |
 
 Entrada pública: `https://lynkado.com.br` → **Cloudflare Tunnel** (`cloudflared`
 no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
@@ -38,6 +39,76 @@ no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
 | Cache / lock | Redis — `redis.redis.svc.cluster.local:6379`, **com senha** (ver projeto `redis`) |
 | Domínio público | `https://lynkado.com.br` via **Cloudflare Tunnel** (`cloudflared` no ns `cloudflare`) |
 | Recursos do pod | requests `300m`/`768Mi` · limits `1500m`/`3Gi` |
+
+## Autenticação: Keycloak (`user_oidc`), desde 27/09/2026
+
+O login do Nextcloud passa pelo **Keycloak** (`https://login.lynkado.com.br`, realm **`lynkado`**, client
+**`nextcloud`**), com o app oficial **`user_oidc` 8.11.0**. O Google virou um provedor **do Keycloak**. O
+antigo app *Social Login* foi desativado e o client antigo do Google foi apagado. Lado Keycloak:
+`fabriziorocha/keycloak`, `migracao/README.md`.
+
+### Como ficou
+
+| Item | Valor |
+|---|---|
+| Provedor `user_oidc` | `Keycloak` (id 1), discovery `https://login.lynkado.com.br/realms/lynkado/.well-known/openid-configuration`, scope `openid email profile` |
+| uid do Nextcloud | claim **`preferred_username`**, com **`unique-uid=0`** (sem hash) e *soft auto-provisioning* (padrão ligado): cai na conta que já existe com o mesmo uid, de qualquer backend |
+| Nome / e-mail | claims `name` / `email` |
+| Grupos | `--group-provisioning=1 --mapping-groups=groups --group-whitelist-regex='^nextcloud$'`: **só o grupo `nextcloud` é sincronizado**. Com whitelist, o código do `user_oidc` ignora (não remove) grupos que não casam com o regex, então os grupos do Nextcloud (Família, admin...) ficam intactos. Conferido no piloto |
+| Restrição de acesso | `--group-restrict-login-to-whitelist=1`: sem o grupo `nextcloud` no token, o Nextcloud recusa o login |
+| Bearer | `check-bearer=0` (API/WebDAV continuam por app password) |
+| Logout | `post-logout` `https://lynkado.com.br/`; backchannel logout do Keycloak em `/apps/user_oidc/backchannel-logout/Keycloak` |
+| Virada | `occ config:app:set user_oidc allow_multiple_user_backends --value=0 --lazy`: `/login` redireciona direto para o Keycloak (só há 1 provedor). O backend `Database` **continua registrado** |
+| Acesso de emergência | **`https://lynkado.com.br/login?direct=1`**: usuário e senha do Nextcloud (conta local `admin`, com TOTP; bot `ultro`) |
+| 2FA | Login pelo Keycloak **não** pede o TOTP do Nextcloud; o segundo fator é o da conta Google. O TOTP do Nextcloud continua valendo no login por senha (`?direct=1`) |
+| Log | `occ log:manage --level=warning` (2); estava em 0 (DEBUG), escrevendo sem parar no disco com defeito |
+
+Os uids foram preservados: os 8 usuários `google-<sub>` (criados pelo Social Login) ganharam no Keycloak o
+mesmo username, já vinculados à conta Google; `fabrizio` foi renomeado no Keycloak para bater com o uid
+local. Piloto com `fabrizio`: mesma conta (backend `Database`), os 7 grupos intactos + `nextcloud`, nenhum
+usuário novo criado. Antes da migração o administrador removeu 5 contas locais (juliana, estevao, moises,
+paulobelesa, nina), junto com as pastas delas; essas pessoas voltam como usuários novos pelo Google.
+
+### Como foi configurado
+
+O secret do client fica em `secret.oidc.local.yaml` (fora do git). Para ele não aparecer em argumento de
+comando (o audit do Kubernetes registra `kubectl exec`), o provedor foi criado num **pod temporário** com a
+imagem do Nextcloud, o PVC montado, label `app: nextcloud-cron` (as NetworkPolicies do MariaDB e do Redis
+já liberam esse label) e o secret por variável de ambiente:
+
+```bash
+php occ user_oidc:provider Keycloak \
+  --clientid=nextcloud --clientsecret-env=NC_OIDC_SECRET \
+  --discoveryuri=https://login.lynkado.com.br/realms/lynkado/.well-known/openid-configuration \
+  --postlogouturi=https://lynkado.com.br/ --scope="openid email profile" \
+  --unique-uid=0 --check-bearer=0 --bearer-provisioning=0 --send-id-token-hint=1 \
+  --mapping-uid=preferred_username --mapping-display-name=name --mapping-email=email \
+  --mapping-groups=groups --group-provisioning=1 \
+  --group-whitelist-regex='^nextcloud$' --group-restrict-login-to-whitelist=1
+```
+
+(Sem segredo, dá para rodar direto: `occ app:install user_oidc`, `occ user_oidc:provider Keycloak
+--output=json_pretty` para conferir.)
+
+### Operação
+
+- **Usuário novo:** entra pelo Google → recebe "sem permissão" → admin coloca no grupo `nextcloud` **no
+  Keycloak** (Users → Groups → Join group) → no próximo login a conta é criada → adicionar aos grupos do
+  Nextcloud aqui.
+- **Tirar acesso:** remover do grupo `nextcloud` ou desativar no Keycloak; para cortar sessões abertas,
+  `occ user:auth-tokens:delete <uid>` (ou pelas configurações de segurança do usuário).
+- **Clientes desktop/celular** já conectados usam app passwords e continuam funcionando; conexões novas
+  passam pelo navegador (Login Flow) e, portanto, pelo Keycloak.
+
+### Rollback
+
+1. `occ config:app:set user_oidc allow_multiple_user_backends --value=1 --lazy` (volta a tela de senha).
+2. Se preciso: `occ app:enable sociallogin`. Os dados dele (`oc_sociallogin_connect`, config cifrada)
+   continuam no banco, **mas o client do Google que ele usava foi apagado**: seria preciso criar outro no
+   Google Cloud e atualizar o provider no Social Login.
+3. `occ app:disable user_oidc`.
+
+Depois de algumas semanas estável: `occ app:remove sociallogin` para limpar o app e as tabelas dele.
 
 ## Backup
 

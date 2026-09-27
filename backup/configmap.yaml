@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-backup
+  namespace: nextcloud
+  labels:
+    app: nextcloud-backup
+data:
+  # Exclusões do backup dos arquivos (regeneráveis ou temporários)
+  excludes.txt: |
+    /nc/data/appdata_*/preview
+    /nc/data/appdata_*/css
+    /nc/data/appdata_*/js
+    /nc/data/*/cache
+    /nc/data/*/uploads
+    /nc/data/*.log
+    /nc/data/default
+    *.part
+    *.ocTransferId*.part
+
+  # MinIO: banco + config + apps + ARQUIVOS (disco separado, mesma máquina).
+  # R2:    banco + config + apps (pequeno, dentro da franquia gratuita; fora de casa).
+  # Um destino com falha não impede o outro, mas o Job termina com erro (e o alerta dispara).
+  backup.sh: |
+    #!/bin/sh
+    set -u
+    RC=0
+    ls -l /dump
+
+    run() {
+      name=$1 subset=$2; shift 2
+      export RESTIC_REPOSITORY=$1 AWS_ACCESS_KEY_ID=$2 AWS_SECRET_ACCESS_KEY=$3; shift 3
+      echo "== [$name] $RESTIC_REPOSITORY -> $*"
+      restic unlock &&
+      restic backup "$@" --tag nextcloud --host nextcloud --exclude-file /scripts/excludes.txt &&
+      restic forget --tag nextcloud --host nextcloud \
+        --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune &&
+      if [ "$(date +%u)" = 7 ]; then restic check --read-data-subset="$subset"; fi
+      st=$?
+      if [ $st -ne 0 ]; then echo "== [$name] FALHOU ($st)"; RC=1; else echo "== [$name] ok"; fi
+    }
+
+    run minio 2% "$MINIO_REPOSITORY" "$MINIO_ACCESS_KEY_ID" "$MINIO_SECRET_ACCESS_KEY" \
+      /dump /nc/config /nc/custom_apps /nc/data
+    run r2 10% "$R2_REPOSITORY" "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY" \
+      /dump /nc/config /nc/custom_apps
+    exit $RC

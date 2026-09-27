@@ -23,6 +23,7 @@ Reconstrução **fiel ("as-is")** dos manifestos que compõem a aplicação
 | `service.yaml` | `Service/nextcloud` ClusterIP (80) |
 | `networkpolicy.yaml` | default-deny + ingress só do `cloudflared` + egress mínimo |
 | `kustomization.yaml` | junta tudo no ns `nextcloud` + labels `app.kubernetes.io/*` (Lens agrupa como "Application") |
+| `backup/` | Backup diário (dump do MariaDB + config + apps + arquivos) com restic → MinIO e Cloudflare R2; aplicado com `kubectl apply -k backup` |
 
 Entrada pública: `https://lynkado.com.br` → **Cloudflare Tunnel** (`cloudflared`
 no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
@@ -37,6 +38,106 @@ no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
 | Cache / lock | Redis — `redis.redis.svc.cluster.local:6379`, **com senha** (ver projeto `redis`) |
 | Domínio público | `https://lynkado.com.br` via **Cloudflare Tunnel** (`cloudflared` no ns `cloudflare`) |
 | Recursos do pod | requests `300m`/`768Mi` · limits `1500m`/`3Gi` |
+
+## Backup
+
+Criado em 2026-09-27. CronJob `nextcloud/nextcloud-backup`, diário às **04:00** (America/Sao_Paulo),
+depois do Mailu (03:00) e do Keycloak (03:30).
+
+| Destino | O que vai | Por quê |
+|---|---|---|
+| **MinIO** `nextcloud-backup` (ns `minio`, disco físico **sdc**, separado do sdb) | dump do banco + `config/` + `custom_apps/` + **arquivos** (`data/`, sem miniaturas/cache) | Restauração completa; ~135 GiB, 117 GB guardados |
+| **Cloudflare R2** `nextcloud-backup` (fora de casa) | dump do banco + `config/` + `custom_apps/` (**sem** os arquivos) | Cabe na franquia gratuita (10 GB). Decisão: os arquivos (~135 GB) ficam só no MinIO |
+
+Se a máquina for perdida, o R2 permite reconstruir contas, grupos, compartilhamentos e configurações,
+mas **não os arquivos**.
+
+Como funciona (`backup/cronjob.yaml`, `backup/configmap.yaml`):
+
+1. initContainer `db-dump` (`mariadb:11.8.9`): `mariadb-dump --single-transaction --quick --routines
+   --triggers` como o usuário `nextcloud` (senha do secret `nextcloud-secret`). Transação única: dump
+   consistente sem travar o Nextcloud. Falha se o arquivo não terminar com `Dump completed`.
+2. container `restic` (0.19.1), com o PVC `nextcloud` montado **somente leitura** em `/nc`:
+   `restic backup` no MinIO (tudo) e no R2 (sem `data/`), exclusões em `excludes.txt` (miniaturas,
+   css/js gerados, cache, uploads parciais), retenção 7 diárias / 4 semanais / 12 mensais e, aos
+   domingos, `restic check --read-data-subset` (2% no MinIO, 10% no R2).
+3. Alertas `NextcloudBackupFailed` e `NextcloudBackupStale` (mais de 26 h sem sucesso) no Prometheus
+   (o Alertmanager do cluster ainda não notifica ninguém).
+
+Segurança: PSA `restricted` (roda como `www-data`, uid 33, dono dos arquivos; rootfs só leitura;
+`drop ALL`). `backup/networkpolicy.yaml` libera só DNS, MariaDB (regra aditiva no ns `mariadb`), MinIO
+(regra no ns `minio`) e IPs públicos na 443 (R2). Segredos: `backup/secret.local.yaml` (fora do git) →
+`backup/sealed-secret.yaml`. **Guarde o `RESTIC_PASSWORD` fora do cluster.**
+
+```bash
+kubectl apply -k backup
+kubectl -n nextcloud get cronjob,jobs -l app=nextcloud-backup
+kubectl -n nextcloud create job --from=cronjob/nextcloud-backup nextcloud-backup-manual-$(date +%s)
+kubectl -n nextcloud logs job/<nome> --all-containers
+```
+
+> Neste cluster `kubectl exec -i`/`kubectl cp` não entregam stdin (kubectl 1.34 × servidor 1.37).
+> Scripts vão por ConfigMap montado ou em base64 no argumento; resultados saem por `kubectl logs`.
+
+### Teste de restauração (feito em 2026-09-27)
+
+Pod temporário no ns `nextcloud` (label `app: nextcloud-backup`, para usar as NetworkPolicies):
+
+- initContainer `restic`: `restic restore latest --verify` do MinIO só de `/dump`, `/nc/config` e 3
+  arquivos de amostra (não cabe restaurar 135 GB num emptyDir: o disco do sistema tem 118 GB);
+- container `mariadb`: `mariadb-install-db` + `mariadbd --skip-networking` num emptyDir (uid 999;
+  conectar com `-u root`), importa o dump e conta os registros.
+
+| Verificação | Resultado |
+|---|---|
+| `restic --verify` | ✅ 17 arquivos, 88 MiB |
+| Tabelas | ✅ 177 (igual à produção) |
+| Usuários / grupos | ✅ 11 / 10 (igual à produção) |
+| `oc_filecache` / compartilhamentos | 37.074 / 9 |
+| Vínculo do Social Login | ✅ `fabrizio` |
+| `config.php` | ✅ `instanceid`, `passwordsalt`, `secret`, `dbpassword` presentes |
+| 3 arquivos de amostra (vídeo, JPG de pasta de grupo, foto de usuário) | ✅ SHA-256 idêntico ao de produção |
+
+### Restauração completa (roteiro, não executado)
+
+1. `occ maintenance:mode --on` (ou escalar o Deployment e o CronJob `nextcloud-cron` a zero).
+2. Banco: restaurar `/dump/nextcloud.sql` no MariaDB (`mariadb -u nextcloud nextcloud < nextcloud.sql`,
+   num pod com o label de backup e o dump restaurado por restic).
+3. Arquivos: pod com o PVC `nextcloud` montado **com escrita**, `restic restore <snapshot> --target /
+   --include /nc/data --include /nc/config --include /nc/custom_apps` (montando o PVC em `/nc`), depois
+   `chown -R 33:33`.
+4. Subir, `occ maintenance:mode --off`, `occ files:scan --all` e `occ maintenance:data-fingerprint`
+   (avisa os clientes de sincronização de que o servidor foi restaurado).
+
+## Incidente: disco sdb com setores ilegíveis (2026-09-27)
+
+O primeiro backup completo encontrou `input/output error`. O kernel confirma
+`Medium Error / Unrecovered read error - auto reallocate failed` no **sdb** (SSD GN-512-2280, 512 GB,
+M.2 2280 SATA, porta `ata2`), que guarda **todos** os volumes `local-path` do cluster
+(`/var/mnt/local-storage`, inclusive o PVC `nextcloud`).
+
+SMART (valores brutos): `Reallocated_Sector_Ct` 14, `Current_Pending_Sector` 14,
+`Offline_Uncorrectable` 24, ~7.800 h ligado. O "PASSED" do SMART é enganoso (o fabricante não ajusta os
+valores normalizados). Diagnóstico: defeito da memória flash, não desgaste. **Troca necessária.**
+
+**10 arquivos ilegíveis** (não entram no backup; só voltam se houver originais para reenviar):
+
+- pasta de grupo 1 (Marketing): `Ensaio Fotos - 1/260201 Secundo/BFV00233.ARW`;
+  `MARKETING/ENSAIO EXTERNA - MAIO - Luma, Alexa, Marina e olivia/DSC09078.ARW` e `DSC09086.JPG`;
+  `MARKETING/ENSAIO FOTOS ESTUDIO 4 - MAIO/05_11_2026_NINA GYN/DSC00948.ARW`;
+  `MARKETING/ENSAIO FOTOS ESTUDIO 4 - MAIO/CAMISAS E BONÉS COPA/05_11_2026_NINA GYN/DSC00589.ARW`;
+- Ana Trindade (`google-112467776291511528952`), `UploadInstantâneo/Camera/`: `20250320_124332.mp4`,
+  `20250420_195928.mp4`, `20250508_102507.mp4`, `20250614_180101.mp4`, `20260117_135602.mp4`.
+
+Acompanhamento: se a contagem de `input/output error` no log do backup noturno crescer, a degradação
+está avançando (troca urgente).
+
+Plano de troca (clone): o `UserVolumeConfig local-storage` do Talos escolhe o disco pela **porta**
+(`disk.bus_path` do `ata2`, `minSize: 512GB`) e acha o volume pelo rótulo `u-local-storage`. Um clone
+feito com **GNU ddrescue** (não `dd`), conferido com `xfs_repair -n`, com a partição e o XFS aumentados
+(`growpart` + `xfs_growfs`) e colocado **no mesmo slot**, monta sem mudar a configuração do Talos. O disco
+novo precisa ter **≥ 512 GB reais** (1 TB recomendado; "500 GB" não passa no `minSize`). Nunca ligar o
+disco antigo e o clone juntos. Antes da troca: backup manual dos três apps (Mailu, Keycloak, Nextcloud).
 
 ## Aplicar
 

@@ -1,3 +1,6 @@
 # Segredos em claro — nunca commitar. Só vão pro Git: secret.example.yaml e sealed-secret.yaml
 secret*.local.yaml
 *.dec.yaml
+client-secret*.json
+*api-token*.json
+*credentials*.json

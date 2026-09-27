@@ -1,0 +1,103 @@
+# Backup diário do Nextcloud: dump consistente do MariaDB + config + apps + arquivos -> restic.
+# MinIO recebe tudo; R2 recebe só banco/config/apps (os arquivos, ~135 GB, ficam só no MinIO).
+# Namespace com PSA "restricted": roda como www-data (33), dono dos arquivos; volume só leitura.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nextcloud-backup
+  namespace: nextcloud
+  labels:
+    app: nextcloud-backup
+spec:
+  schedule: "0 4 * * *"          # 04:00, depois do Mailu (03:00) e do Keycloak (03:30)
+  timeZone: America/Sao_Paulo
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: nextcloud-backup
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 21600   # 6 h (o primeiro backup lê ~135 GB)
+      template:
+        metadata:
+          labels:
+            app: nextcloud-backup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 33
+            runAsGroup: 33
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            # Dump consistente (InnoDB, --single-transaction) sem travar o Nextcloud.
+            - name: db-dump
+              image: mariadb:11.8.9
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  mariadb-dump -h mariadb.mariadb.svc.cluster.local -u nextcloud \
+                    --single-transaction --quick --routines --triggers \
+                    --default-character-set=utf8mb4 nextcloud > /dump/nextcloud.sql
+                  tail -1 /dump/nextcloud.sql | grep -q 'Dump completed' || { echo "dump incompleto"; exit 1; }
+                  echo "dump: $(wc -c < /dump/nextcloud.sql) bytes, $(grep -c '^CREATE TABLE' /dump/nextcloud.sql) tabelas"
+              env:
+                - name: MYSQL_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: nextcloud-secret
+                      key: MYSQL_PASSWORD
+              volumeMounts:
+                - { name: dump, mountPath: /dump }
+              resources:
+                requests: { cpu: 20m, memory: 64Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+          containers:
+            - name: restic
+              image: restic/restic:0.19.1
+              command: ["sh", "/scripts/backup.sh"]
+              env:
+                - { name: MINIO_REPOSITORY, value: "s3:http://minio.minio.svc.cluster.local:9000/nextcloud-backup" }
+                - { name: R2_REPOSITORY, value: "s3:https://618ad0ac626e577760cc8893bdd298fe.r2.cloudflarestorage.com/nextcloud-backup" }
+                - { name: RESTIC_CACHE_DIR, value: /cache }
+                - { name: HOME, value: /cache }
+                - { name: TZ, value: America/Sao_Paulo }
+              envFrom:
+                - secretRef:
+                    name: nextcloud-backup
+              volumeMounts:
+                - { name: nextcloud, mountPath: /nc, readOnly: true }
+                - { name: dump, mountPath: /dump, readOnly: true }
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: cache, mountPath: /cache }
+                - { name: tmp, mountPath: /tmp }
+              resources:
+                requests: { cpu: 100m, memory: 256Mi }
+                limits: { memory: 2Gi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+          volumes:
+            - name: nextcloud
+              persistentVolumeClaim:
+                claimName: nextcloud
+                readOnly: true
+            - { name: dump, emptyDir: {} }
+            - { name: cache, emptyDir: {} }
+            - { name: tmp, emptyDir: {} }
+            - name: scripts
+              configMap:
+                name: nextcloud-backup

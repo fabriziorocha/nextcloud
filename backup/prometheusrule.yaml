@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: nextcloud-backup
+  namespace: nextcloud
+  labels:
+    release: kube-prometheus-stack   # ruleSelector do kube-prometheus-stack
+spec:
+  groups:
+    - name: nextcloud-backup
+      rules:
+        - alert: NextcloudBackupFailed
+          expr: kube_job_status_failed{namespace="nextcloud", job_name=~"nextcloud-backup.*"} > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Backup do Nextcloud falhou ({{ $labels.job_name }})"
+            description: "Veja: kubectl -n nextcloud logs job/{{ $labels.job_name }} --all-containers"
+        - alert: NextcloudBackupStale
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="nextcloud", cronjob="nextcloud-backup"} > 26 * 3600
+          labels:
+            severity: critical
+          annotations:
+            summary: "Backup do Nextcloud sem sucesso há mais de 26 horas"
+            description: "O último backup bem-sucedido foi há {{ $value | humanizeDuration }}."

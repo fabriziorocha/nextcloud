@@ -59,6 +59,7 @@ antigo app *Social Login* foi desativado e o client antigo do Google foi apagado
 | Bearer | `check-bearer=0` (API/WebDAV continuam por app password) |
 | Logout | `post-logout` `https://lynkado.com.br/`; backchannel logout do Keycloak em `/apps/user_oidc/backchannel-logout/Keycloak` |
 | Virada | `occ config:app:set user_oidc allow_multiple_user_backends --value=0 --lazy`: `/login` redireciona direto para o Keycloak (só há 1 provedor). O backend `Database` **continua registrado** |
+| Texto do botão | **"Login com Lynkado"**: `occ config:system:set user_oidc login_label --value="Login com Lynkado"` (sem isso o `user_oidc` mostra "Login with <identificador>"; o identificador `Keycloak` foi mantido porque faz parte da URL de backchannel logout configurada no Keycloak). Aparece em `?direct=1` e depois do logout |
 | Acesso de emergência | **`https://lynkado.com.br/login?direct=1`**: usuário e senha do Nextcloud (conta local `admin`, com TOTP; bot `ultro`) |
 | 2FA | Login pelo Keycloak **não** pede o TOTP do Nextcloud; o segundo fator é o da conta Google. O TOTP do Nextcloud continua valendo no login por senha (`?direct=1`) |
 | Log | `occ log:manage --level=warning` (2); estava em 0 (DEBUG), escrevendo sem parar no disco com defeito |

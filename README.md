@@ -26,8 +26,16 @@ Reconstrução **fiel ("as-is")** dos manifestos que compõem a aplicação
 | `backup/` | Backup diário (dump do MariaDB + config + apps + arquivos) com restic → MinIO e Cloudflare R2; aplicado com `kubectl apply -k backup` |
 | `secret.oidc.local.yaml` | secret do client OIDC `nextcloud` no Keycloak — **em `.gitignore`** |
 
-Entrada pública: `https://lynkado.com.br` → **Cloudflare Tunnel** (`cloudflared`
+Entrada pública: `https://cloud.lynkado.com.br` → **Cloudflare Tunnel** (`cloudflared`
 no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
+
+> **Troca de domínio (03/10/2026):** o hostname público no túnel passou de `lynkado.com.br` para
+> `cloud.lynkado.com.br`. Além do `configmap.yaml` (`OVERWRITEHOST`; `NEXTCLOUD_TRUSTED_DOMAINS` só vale
+> na instalação inicial), a instância já instalada foi ajustada com `occ`:
+> `config:system:set trusted_domains 0`, `overwritehost`, `overwrite.cli.url` e
+> `user_oidc:provider Keycloak --postlogouturi=https://cloud.lynkado.com.br/`. No Keycloak, o client
+> `nextcloud` precisa aceitar `https://cloud.lynkado.com.br/*` em *Valid redirect URIs* e
+> *Valid post logout redirect URIs*.
 
 ## Estado observado no cluster
 
@@ -37,7 +45,7 @@ no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
 | Deployment revision | 49 (muitas edições manuais via Lens/kubectl) |
 | Banco | MariaDB — `mariadb.mariadb.svc.cluster.local` |
 | Cache / lock | Redis — `redis.redis.svc.cluster.local:6379`, **com senha** (ver projeto `redis`) |
-| Domínio público | `https://lynkado.com.br` via **Cloudflare Tunnel** (`cloudflared` no ns `cloudflare`) |
+| Domínio público | `https://cloud.lynkado.com.br` via **Cloudflare Tunnel** (`cloudflared` no ns `cloudflare`) |
 | Recursos do pod | requests `300m`/`768Mi` · limits `1500m`/`3Gi` |
 
 ## Autenticação: Keycloak (`user_oidc`), desde 27/09/2026
@@ -57,10 +65,10 @@ antigo app *Social Login* foi desativado e o client antigo do Google foi apagado
 | Grupos | `--group-provisioning=1 --mapping-groups=groups --group-whitelist-regex='^nextcloud$'`: **só o grupo `nextcloud` é sincronizado**. Com whitelist, o código do `user_oidc` ignora (não remove) grupos que não casam com o regex, então os grupos do Nextcloud (Família, admin...) ficam intactos. Conferido no piloto |
 | Restrição de acesso | `--group-restrict-login-to-whitelist=1`: sem o grupo `nextcloud` no token, o Nextcloud recusa o login |
 | Bearer | `check-bearer=0` (API/WebDAV continuam por app password) |
-| Logout | `post-logout` `https://lynkado.com.br/`; backchannel logout do Keycloak em `/apps/user_oidc/backchannel-logout/Keycloak` |
+| Logout | `post-logout` `https://cloud.lynkado.com.br/`; backchannel logout do Keycloak em `/apps/user_oidc/backchannel-logout/Keycloak` |
 | Virada | `occ config:app:set user_oidc allow_multiple_user_backends --value=0 --lazy`: `/login` redireciona direto para o Keycloak (só há 1 provedor). O backend `Database` **continua registrado** |
 | Texto do botão | **"Login com Lynkado"**: `occ config:system:set user_oidc login_label --value="Login com Lynkado"` (sem isso o `user_oidc` mostra "Login with <identificador>"; o identificador `Keycloak` foi mantido porque faz parte da URL de backchannel logout configurada no Keycloak). Aparece em `?direct=1` e depois do logout |
-| Acesso de emergência | **`https://lynkado.com.br/login?direct=1`**: usuário e senha do Nextcloud (conta local `admin`, com TOTP; bot `ultro`) |
+| Acesso de emergência | **`https://cloud.lynkado.com.br/login?direct=1`**: usuário e senha do Nextcloud (conta local `admin`, com TOTP; bot `ultro`) |
 | 2FA | Login pelo Keycloak **não** pede o TOTP do Nextcloud; o segundo fator é o da conta Google. O TOTP do Nextcloud continua valendo no login por senha (`?direct=1`) |
 | Log | `occ log:manage --level=warning` (2); estava em 0 (DEBUG), escrevendo sem parar no disco com defeito |
 
@@ -81,7 +89,7 @@ já liberam esse label) e o secret por variável de ambiente:
 php occ user_oidc:provider Keycloak \
   --clientid=nextcloud --clientsecret-env=NC_OIDC_SECRET \
   --discoveryuri=https://login.lynkado.com.br/realms/lynkado/.well-known/openid-configuration \
-  --postlogouturi=https://lynkado.com.br/ --scope="openid email profile" \
+  --postlogouturi=https://cloud.lynkado.com.br/ --scope="openid email profile" \
   --unique-uid=0 --check-bearer=0 --bearer-provisioning=0 --send-id-token-hint=1 \
   --mapping-uid=preferred_username --mapping-display-name=name --mapping-email=email \
   --mapping-groups=groups --group-provisioning=1 \

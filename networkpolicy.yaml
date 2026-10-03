@@ -13,7 +13,7 @@ spec:
   policyTypes: ["Ingress", "Egress"]
 ---
 # 2. Ingress: SÓ o cloudflared alcança o Nextcloud na porta 80.
-#    Todo tráfego externo (https://lynkado.com.br) entra pelo Cloudflare Tunnel.
+#    Todo tráfego externo (https://cloud.lynkado.com.br) entra pelo Cloudflare Tunnel.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

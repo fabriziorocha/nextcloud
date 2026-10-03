@@ -19,8 +19,8 @@ data:
   NEXTCLOUD_ADMIN_USER: "admin"
 
   # --- Rede / URLs (TLS termina na borda: Cloudflare Tunnel) ---
-  NEXTCLOUD_TRUSTED_DOMAINS: "lynkado.com.br"
-  OVERWRITEHOST: "lynkado.com.br"
+  NEXTCLOUD_TRUSTED_DOMAINS: "cloud.lynkado.com.br"
+  OVERWRITEHOST: "cloud.lynkado.com.br"
   OVERWRITEPROTOCOL: "https"
   TRUSTED_PROXIES: "10.244.0.0/24"
 

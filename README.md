@@ -41,12 +41,12 @@ no ns `cloudflare`) → `Service/nextcloud:80`. Não há Ingress.
 
 | Item | Valor |
 | --- | --- |
-| Versão Nextcloud | 34.0.3 (imagem `docker.io/library/nextcloud:latest`) |
+| Versão Nextcloud | 35.0.2 (imagem `nextcloud:35.0.2-apache`, desde 2026-10-21; era 34.0.3 em `:latest`) |
 | Deployment revision | 49 (muitas edições manuais via Lens/kubectl) |
 | Banco | MariaDB — `mariadb.mariadb.svc.cluster.local` |
 | Cache / lock | Redis — `redis.redis.svc.cluster.local:6379`, **com senha** (ver projeto `redis`) |
 | Domínio público | `https://cloud.lynkado.com.br` via **Cloudflare Tunnel** (`cloudflared` no ns `cloudflare`) |
-| Recursos do pod | requests `300m`/`768Mi` · limits `1500m`/`3Gi` |
+| Recursos do pod | requests `150m`/`512Mi` · limits `1500m`/`4Gi` |
 
 ## Autenticação: Keycloak (`user_oidc`), desde 27/09/2026
 
@@ -118,6 +118,38 @@ php occ user_oidc:provider Keycloak \
 3. `occ app:disable user_oidc`.
 
 Depois de algumas semanas estável: `occ app:remove sociallogin` para limpar o app e as tabelas dele.
+
+## Upgrade 34 → 35 (2026-10-21)
+
+34.0.4 → 34.0.5 → **35.0.2** (último patch da major antes de pular de major; o Nextcloud não aceita
+pular major). Roteiro usado, que serve para os próximos:
+
+1. Conferir no App Store (`https://apps.nextcloud.com/api/v1/platform/<versão>/apps.json`) se os apps
+   instalados têm release para a versão nova. Na 35 todos tinham.
+2. Conferir que nada fora de `data/` no PVC é de outro dono além do `www-data`
+   (`find /var/www/html -path ./data -prune -o ! -user www-data -print`).
+3. Backup manual (`kubectl -n nextcloud create job --from=cronjob/nextcloud-backup ...`) e conferir
+   `== [minio] ok` e `== [r2] ok` no log. Antes deste upgrade: MinIO `5f317aea`, R2 `f1872607`.
+4. Suspender o cron (`kubectl -n nextcloud patch cronjob nextcloud-cron -p '{"spec":{"suspend":true}}'`),
+   trocar o `newTag` no `kustomization.yaml`, `kubectl apply -k .`, acompanhar o log do pod (o entrypoint
+   faz rsync + `occ upgrade`), reativar o cron.
+5. Depois: `occ status`, `occ app:list`, `occ db:add-missing-indices`, `occ setupchecks`.
+
+Observado na 35.0.2:
+
+- `groupfolders` foi desativado como incompatível e reativado logo em seguida já na 23.0.1 (pelo próprio
+  upgrade). As 4 pastas de grupo continuam lá.
+- `occ db:schema:check` acusa `oc_share_external: column 'id' differs in: autoincrement`, mas a coluna
+  **está** com `AUTO_INCREMENT` no MariaDB e a tabela está vazia (compartilhamento federado não é usado).
+  Parece falso positivo do verificador; não mexi.
+- `db:add-missing-indices` criou 2 índices (`oc_taskprocessing_tasks`, `oc_notifications`).
+- O mesmo `schema:check` lista tabelas órfãs dos apps `tables` (desativado) e `dkmunorg` (removido).
+- `setupchecks` passou a mostrar "2 database checks are failing": é o verificador novo do `serverinfo`
+  35 com sugestões de tuning do MariaDB (projeto `mariadb`), não erro do upgrade. Os 2 avisos:
+  81% das tabelas temporárias vão para disco (sugere `tmp_table_size`/`max_heap_table_size` 64M) e
+  `innodb_log_file_size` de 96 MiB (sugere 256M; exige reiniciar o MariaDB). **Aplicados no mesmo
+  dia** no projeto `mariadb` (tmp 64M, redo log 256M, imagem fixada em 11.8.9); backup antes: MinIO
+  `e6a6225d`, R2 `56160dc5`.
 
 ## Backup
 
@@ -283,11 +315,12 @@ kubectl -n nextcloud rollout status deploy/nextcloud
      (resíduo de quando o pod sempre rodava como root) e bloqueava o
      non-root. Corrigido uma única vez via `chown www-data:www-data` — esse,
      sim, foi definitivo (é dado no PVC, não recriado a cada pod).
-   ⚠️ Não testado: o caminho de **upgrade de major** do entrypoint
-   (`NEXTCLOUD_UPDATE=1`) sob non-root — só será exercitado no próximo bump
-   de major version. Se falhar, o rollout trava com o `enforce: restricted`
-   já ativo; ter esse Pendência em mente antes do próximo upgrade de major.
-5. **`strategy` padrão (RollingUpdate)** com PVC RWO — pode travar rollout.
+   ✅ Upgrade de major sob non-root **testado em 2026-10-21** (34 → 35, ver
+   "Upgrade 34 → 35"): o rsync do entrypoint funciona porque todo o código no
+   PVC é do `www-data`. Se aparecer arquivo de outro dono fora de `data/`, o
+   rsync falha e o pod não sobe.
+5. ~~`strategy` padrão (RollingUpdate)~~ — **resolvido em 2026-10-21**:
+   `Recreate` (nunca duas versões rodando sobre o mesmo PVC).
 6. Sem ServiceAccount dedicada (usa `default`).
 7. **NetworkPolicy não é aplicada pelo Flannel** (CNI atual). `networkpolicy.yaml`
    fica como intenção declarativa até haver um enforcer no cluster.

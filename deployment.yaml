@@ -7,8 +7,11 @@ spec:
   selector:
     matchLabels:
       app: nextcloud
-  # as-is: no cluster a strategy é a padrão (RollingUpdate 25%/25%). Com PVC RWO
-  # + dados no volume isso pode travar num rollout; o certo seria `Recreate`.
+  # Recreate: o pod antigo sai antes do novo subir. Com PVC RWO e o entrypoint
+  # fazendo rsync + `occ upgrade` no volume, nunca pode haver duas versões do
+  # Nextcloud rodando juntas sobre o mesmo PVC (era RollingUpdate até 2026-10-21).
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -109,16 +112,16 @@ spec:
             initialDelaySeconds: 15
           # Uso observado (Prometheus/lens-metrics, 2d): steady ~330Mi / <50m;
           # pico ~3050Mi / ~1500m por <1h durante `occ upgrade`/repair de major.
-          # -> request enxuto (steady real); limit mantido em 3Gi para o pico.
-          # ATENÇÃO: em upgrade de major do Nextcloud, suba o limit p/ 4Gi antes
-          # do rollout — OOM no meio da migração de schema deixa o banco inconsistente.
+          # -> request enxuto (steady real); limit em 4Gi desde o upgrade 34 -> 35
+          # (2026-10-21): OOM no meio da migração de schema deixa o banco
+          # inconsistente, e o pod já tinha sido OOMKilled com 3Gi (README).
           resources:
             requests:
               cpu: "150m"
               memory: "512Mi"
             limits:
               cpu: "1500m"
-              memory: "3Gi"
+              memory: "4Gi"
       volumes:
         - name: nextcloud
           persistentVolumeClaim:
